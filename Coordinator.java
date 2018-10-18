@@ -33,10 +33,17 @@ public class Coordinator extends Verticle {
     dataCenters.add(dataCenter3);
 
     /**
-     * {@code #PriorityQueue} stores all the waiting tasks by their own key
+     * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key
      *
      */
-    private static ConcurrentHashMap<String, PriorityQueue<Long>> allWaitingTasks = new
+    private static ConcurrentHashMap<String, PriorityQueue<Long>> allTimestamps = new
+            ConcurrentHashMap<>();
+    /**
+     * {@code #ConcurrentHashMap} stores all the waiting task operation (put/get)
+     * by their own key
+     *
+     */
+    private static ConcurrentHashMap<String, HashMap<String, Integer>> allOperations = new
             ConcurrentHashMap<>();
 
     /**
@@ -48,11 +55,11 @@ public class Coordinator extends Verticle {
     public static void acquireLock(Long timestamp, String key) {
         PriorityQueue<Long> keyWaitingQueue;
 
-        synchronized(allWaitingTasks) {
-            if (!allWaitingTasks.containsKey(key)) {
-                allWaitingTasks.put(key, new PriorityQueue<Long>());
+        synchronized(allTimestamps) {
+            if (!allTimestamps.containsKey(key)) {
+                allTimestamps.put(key, new PriorityQueue<Long>());
             }
-            keyWaitingQueue = allWaitingTasks.get(key)
+            keyWaitingQueue = allTimestamps.get(key)
             keyWaitingQueue.add(timestamp);
         }
 
@@ -75,7 +82,7 @@ public class Coordinator extends Verticle {
      *
      */
     public static void releaseLock(String key) {
-        PriorityQueue<Long> keyWaitingQueue = allWaitingTasks.get(key);
+        PriorityQueue<Long> keyWaitingQueue = allTimestamps.get(key);
         synchronized(keyWaitingQueue) {
             keyWaitingQueue.poll();
             keyWaitingQueue.notifyAll();
@@ -109,10 +116,29 @@ public class Coordinator extends Verticle {
                         //Each PUT operation is handled in a different thread.
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
-                        KeyValueLib.PUT(dataCenter1, key, value);
-                        KeyValueLib.PUT(dataCenter2, key, value);
-                        KeyValueLib.PUT(dataCenter3, key, value);
+                        HashMap<String, Integer> keyWaitingOperations;
+                        synchronized(allOperations) {
+                            if (!allOperations.containsKey(key)) {
+                                allOperations.put(key, new HashMap<String, Integer>());
+                            }
+                            keyWaitingOperations = allOperations.get(key);
+                        }
 
+                        synchronized(keyWaitingOperations) {
+                            if (keyWaitingOperations.size() == 0) {
+                                keyWaitingOperations.put("PUT", 1);
+                                KeyValueLib.PUT(dataCenter1, key, value);
+                                KeyValueLib.PUT(dataCenter2, key, value);
+                                KeyValueLib.PUT(dataCenter3, key, value);
+                                keyWaitingOperations.remove("PUT");
+                            } else {
+                                try {
+                                    keyWaitingOperations.wait();
+                                } catch (InterruptedException e) {
+                                    e.printStackTrace();
+                                }
+                            }
+                        }
                         releaseLock(key);
                     }
                 });
@@ -142,12 +168,38 @@ public class Coordinator extends Verticle {
                         //Each GET operation is handled in a different thread.
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
+
+                        synchronized(allOperations) {
+                            if (!allOperations.containsKey(key)) {
+                                allOperations.put(key, new HashMap<String, Integer>());
+                            }
+                            keyWaitingOperations = allOperations.get(key);
+                        }
+
+                        synchronized(keyWaitingOperations) {
+                            if (keyWaitingOperations.size() == 0) {
+                                keyWaitingOperations.put("GET", 1);
+                            } else {
+                                keyWaitingOperations.put("GET",
+                                        keyWaitingOperations.get("GET") + 1);
+                            }
+                            releaseLock(key);
+                        }
                         String value = KeyValueLib.GET(dataCenters.get(Integer.parseInt(key)), key);
                         if (value.equals("null")) {
                             value = "0";
                         }
-                        releaseLock(key);
 
+                        synchronized(keyWaitingOperations) {
+                            int numOps = keyWaitingOperations.get("GET");
+                            numOps--;
+                            if (numOps == 0) {
+                                keyWaitingOperations.remove("GET");
+                                keyWaitingOperations.notifyAll();
+                            } else {
+                                keyWaitingOperations.put("GET", numOps);
+                            }
+                        }
                         req.response().end(value);
                     }
                 });
@@ -156,31 +208,31 @@ public class Coordinator extends Verticle {
         });
 
         routeMatcher.get("/flush", new Handler<HttpServerRequest>() {
-          @Override
-          public void handle(final HttpServerRequest req) {
-            //Flush all datacenters before each test.
-            URL url = null;
-            try {
-              flush(dataCenter1);
-              flush(dataCenter2);
-              flush(dataCenter3);
-            } catch (Exception e) {
-              e.printStackTrace();
+            @Override
+            public void handle(final HttpServerRequest req) {
+                //Flush all datacenters before each test.
+                URL url = null;
+                try {
+                  flush(dataCenter1);
+                  flush(dataCenter2);
+                  flush(dataCenter3);
+                } catch (Exception e) {
+                  e.printStackTrace();
+                }
+                //This endpoint will be used by the auto-grader to flush your datacenter before tests
+                //You can initialize/re-initialize the required data structures here
+                req.response().end();
             }
-            //This endpoint will be used by the auto-grader to flush your datacenter before tests
-            //You can initialize/re-initialize the required data structures here
-            req.response().end();
-           }
 
-           private void flush(String dataCenter) throws Exception {
-            URL url = new URL("http://" + dataCenter + ":8080/flush");
-            BufferedReader in = new BufferedReader(
-                                  new InputStreamReader(
-                                    url.openConnection().getInputStream()));
-            String inputLine;
-            while ((inputLine = in.readLine()) != null);
-            in.close();
-           }
+            private void flush(String dataCenter) throws Exception {
+                URL url = new URL("http://" + dataCenter + ":8080/flush");
+                BufferedReader in = new BufferedReader(
+                                      new InputStreamReader(
+                                        url.openConnection().getInputStream()));
+                String inputLine;
+                while ((inputLine = in.readLine()) != null);
+                in.close();
+            }
         });
 
 
