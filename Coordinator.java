@@ -52,8 +52,10 @@ public class Coordinator extends Verticle {
         PriorityQueue<String> keyWaitingQueue;
 
         synchronized (allTimestamps) {
-            if (!allTimestamps.containsKey(key)) {
+            keyWaitingQueue = allTimestamps.get(key);
+            if (keyWaitingQueue == null) {
                 allTimestamps.put(key, new PriorityQueue<String>());
+                keyWaitingQueue = allTimestamps.get(key);
             }
             keyWaitingQueue = allTimestamps.get(key);
             keyWaitingQueue.add(timestamp);
@@ -114,10 +116,11 @@ public class Coordinator extends Verticle {
                         acquireLock(timestamp, key);
                         HashMap<String, Integer> keyWaitingOperations;
                         synchronized(allOperations) {
-                            if (!allOperations.containsKey(key)) {
-                                allOperations.put(key, new HashMap<String, Integer>());
-                            }
                             keyWaitingOperations = allOperations.get(key);
+                            if (keyWaitingOperations == null) {
+                                allOperations.put(key, new HashMap<String, Integer>());
+                                keyWaitingOperations = allOperations.get(key);
+                            }
                         }
 
                         synchronized(keyWaitingOperations) {
@@ -170,10 +173,11 @@ public class Coordinator extends Verticle {
                         acquireLock(timestamp, key);
                         HashMap<String, Integer> keyWaitingOperations;
                         synchronized(allOperations) {
-                            if (!allOperations.containsKey(key)) {
-                                allOperations.put(key, new HashMap<String, Integer>());
-                            }
                             keyWaitingOperations = allOperations.get(key);
+                            if (keyWaitingOperations == null) {
+                                allOperations.put(key, new HashMap<String, Integer>());
+                                keyWaitingOperations = allOperations.get(key);
+                            }
                         }
 
                         synchronized (keyWaitingOperations) {
@@ -186,29 +190,21 @@ public class Coordinator extends Verticle {
                             releaseLock(key);
                         }
                         String value = "null";
-                        switch (loc) {
-                            case "1":
-                                try {
+                        try {
+                            switch (loc) {
+                                case "1":
                                     value = KeyValueLib.GET(dataCenter1, key);
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                                break;
-                            case "2":
-                                try {
+                                    break;
+                                case "2":
                                     value = KeyValueLib.GET(dataCenter2, key);
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                                break;
-                            case "3":
-                                try {
+                                    break;
+                                case "3":
                                     value = KeyValueLib.GET(dataCenter3, key);
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                                break;
-                            default:
+                                    break;
+                                default:
+                            }
+                        } catch (IOException e) {
+                            e.printStackTrace();
                         }
 
                         if (value.equals("null")) {
