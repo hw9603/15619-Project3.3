@@ -1,6 +1,6 @@
 import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.InterruptedException;
 import java.net.URL;
 import java.sql.Timestamp;
@@ -29,28 +29,30 @@ public class Coordinator extends Verticle {
     private static final String dataCenter3 = "172.31.88.132";
 
     /**
-     * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key
+     * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key.
      *
      */
     private static ConcurrentHashMap<String, PriorityQueue<String>> allTimestamps = new
             ConcurrentHashMap<>();
+
     /**
      * {@code #ConcurrentHashMap} stores all the waiting task operation (put/get)
-     * by their own key
+     * by their own key.
      *
      */
     private static ConcurrentHashMap<String, HashMap<String, Integer>> allOperations = new
             ConcurrentHashMap<>();
 
     /**
-     *
+     * Acquire lock measn peek at the current operation queue for the specified key,
+     * if the next one is the current operation, we start the thread. Otherwise, wait
+     * until awaken by other threads.
      *
      * @param timestamp the timestamp of the operation
      * @param key the key of the operation
      */
     public static void acquireLock(String timestamp, String key) {
         PriorityQueue<String> keyWaitingQueue;
-
         synchronized (allTimestamps) {
             keyWaitingQueue = allTimestamps.get(key);
             if (keyWaitingQueue == null) {
@@ -107,7 +109,7 @@ public class Coordinator extends Verticle {
                 final String value = map.get("value");
                 //You may use the following timestamp for ordering requests
                 final String timestamp = new Timestamp(System.currentTimeMillis()
-                                           + TimeZone.getTimeZone("EST").getRawOffset()).toString();
+                                        + TimeZone.getTimeZone("EST").getRawOffset()).toString();
                 Thread t = new Thread(new Runnable() {
                     public void run() {
                         //TODO: Write code for PUT operation here.
@@ -115,31 +117,30 @@ public class Coordinator extends Verticle {
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
                         HashMap<String, Integer> keyWaitingOperations;
-                        synchronized(allOperations) {
+                        // Retrieve the waiting queue for the specified key.
+                        synchronized (allOperations) {
                             keyWaitingOperations = allOperations.get(key);
                             if (keyWaitingOperations == null) {
                                 allOperations.put(key, new HashMap<String, Integer>());
                                 keyWaitingOperations = allOperations.get(key);
                             }
                         }
-
-                        synchronized(keyWaitingOperations) {
-                            if (keyWaitingOperations.size() == 0) {
-                                keyWaitingOperations.put("PUT", 1);
-                                try {
-                                    KeyValueLib.PUT(dataCenter1, key, value);
-                                    KeyValueLib.PUT(dataCenter2, key, value);
-                                    KeyValueLib.PUT(dataCenter3, key, value);
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                                keyWaitingOperations.remove("PUT");
-                            } else {
+                        // Lock on the waiting queue for the specified key.
+                        synchronized (keyWaitingOperations) {
+                            while (keyWaitingOperations.size() != 0) {
                                 try {
                                     keyWaitingOperations.wait();
                                 } catch (InterruptedException e) {
                                     e.printStackTrace();
                                 }
+                            }
+                            // There is no pending job. Just do the PUT job.
+                            try {
+                                KeyValueLib.PUT(dataCenter1, key, value);
+                                KeyValueLib.PUT(dataCenter2, key, value);
+                                KeyValueLib.PUT(dataCenter3, key, value);
+                            } catch (IOException e) {
+                                e.printStackTrace();
                             }
                         }
                         releaseLock(key);
@@ -172,14 +173,15 @@ public class Coordinator extends Verticle {
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
                         HashMap<String, Integer> keyWaitingOperations;
-                        synchronized(allOperations) {
+                        // Retrieve the waiting queue for the specified key.
+                        synchronized (allOperations) {
                             keyWaitingOperations = allOperations.get(key);
                             if (keyWaitingOperations == null) {
                                 allOperations.put(key, new HashMap<String, Integer>());
                                 keyWaitingOperations = allOperations.get(key);
                             }
                         }
-
+                        // Add the GET job to the waiting queue.
                         synchronized (keyWaitingOperations) {
                             if (keyWaitingOperations.size() == 0) {
                                 keyWaitingOperations.put("GET", 1);
@@ -187,8 +189,10 @@ public class Coordinator extends Verticle {
                                 keyWaitingOperations.put("GET",
                                         keyWaitingOperations.get("GET") + 1);
                             }
-                            releaseLock(key);
                         }
+                        // Need to release lock in order not to block other GET requests
+                        releaseLock(key);
+                        // Do the GET job.
                         String value = "null";
                         try {
                             switch (loc) {
@@ -210,7 +214,7 @@ public class Coordinator extends Verticle {
                         if (value.equals("null")) {
                             value = "0";
                         }
-
+                        // Update the number of GET operations.
                         synchronized (keyWaitingOperations) {
                             int numOps = keyWaitingOperations.get("GET");
                             numOps--;
@@ -240,8 +244,9 @@ public class Coordinator extends Verticle {
                 } catch (Exception e) {
                   e.printStackTrace();
                 }
-                //This endpoint will be used by the auto-grader to flush your datacenter before tests
-                //You can initialize/re-initialize the required data structures here
+                // This endpoint will be used by the auto-grader to flush your datacenter
+                // before tests
+                // You can initialize/re-initialize the required data structures here
                 req.response().end();
             }
 
