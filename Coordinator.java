@@ -1,5 +1,6 @@
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.IOException;
 import java.lang.InterruptedException;
 import java.net.URL;
 import java.sql.Timestamp;
@@ -23,20 +24,15 @@ public class Coordinator extends Verticle {
      * TODO: Set the values of the following variables to the PRIVATE IP of your
      * three dataCenter instances.
      */
-    private static final String dataCenter1 = "172.31.92.96";
-    private static final String dataCenter2 = "172.31.83.207";
-    private static final String dataCenter3 = "172.31.92.13";
-
-    private static List<String> dataCenters = new ArrayList<String>();
-    dataCenters.add(dataCenter1);
-    dataCenters.add(dataCenter2);
-    dataCenters.add(dataCenter3);
+    private static final String dataCenter1 = "172.31.88.56";
+    private static final String dataCenter2 = "172.31.80.55";
+    private static final String dataCenter3 = "172.31.88.132";
 
     /**
      * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key
      *
      */
-    private static ConcurrentHashMap<String, PriorityQueue<Long>> allTimestamps = new
+    private static ConcurrentHashMap<String, PriorityQueue<String>> allTimestamps = new
             ConcurrentHashMap<>();
     /**
      * {@code #ConcurrentHashMap} stores all the waiting task operation (put/get)
@@ -52,19 +48,19 @@ public class Coordinator extends Verticle {
      * @param timestamp the timestamp of the operation
      * @param key the key of the operation
      */
-    public static void acquireLock(Long timestamp, String key) {
-        PriorityQueue<Long> keyWaitingQueue;
+    public static void acquireLock(String timestamp, String key) {
+        PriorityQueue<String> keyWaitingQueue;
 
-        synchronized(allTimestamps) {
+        synchronized (allTimestamps) {
             if (!allTimestamps.containsKey(key)) {
-                allTimestamps.put(key, new PriorityQueue<Long>());
+                allTimestamps.put(key, new PriorityQueue<String>());
             }
-            keyWaitingQueue = allTimestamps.get(key)
+            keyWaitingQueue = allTimestamps.get(key);
             keyWaitingQueue.add(timestamp);
         }
 
-        synchronized(keyWaitingQueue) {
-            long top = keyWaitingQueue.peek();
+        synchronized (keyWaitingQueue) {
+            String top = keyWaitingQueue.peek();
             while (!top.equals(timestamp)) {
                 try {
                     keyWaitingQueue.wait();
@@ -82,8 +78,8 @@ public class Coordinator extends Verticle {
      *
      */
     public static void releaseLock(String key) {
-        PriorityQueue<Long> keyWaitingQueue = allTimestamps.get(key);
-        synchronized(keyWaitingQueue) {
+        PriorityQueue<String> keyWaitingQueue = allTimestamps.get(key);
+        synchronized (keyWaitingQueue) {
             keyWaitingQueue.poll();
             keyWaitingQueue.notifyAll();
         }
@@ -127,9 +123,13 @@ public class Coordinator extends Verticle {
                         synchronized(keyWaitingOperations) {
                             if (keyWaitingOperations.size() == 0) {
                                 keyWaitingOperations.put("PUT", 1);
-                                KeyValueLib.PUT(dataCenter1, key, value);
-                                KeyValueLib.PUT(dataCenter2, key, value);
-                                KeyValueLib.PUT(dataCenter3, key, value);
+                                try {
+                                    KeyValueLib.PUT(dataCenter1, key, value);
+                                    KeyValueLib.PUT(dataCenter2, key, value);
+                                    KeyValueLib.PUT(dataCenter3, key, value);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
                                 keyWaitingOperations.remove("PUT");
                             } else {
                                 try {
@@ -168,7 +168,7 @@ public class Coordinator extends Verticle {
                         //Each GET operation is handled in a different thread.
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
-
+                        HashMap<String, Integer> keyWaitingOperations;
                         synchronized(allOperations) {
                             if (!allOperations.containsKey(key)) {
                                 allOperations.put(key, new HashMap<String, Integer>());
@@ -176,7 +176,7 @@ public class Coordinator extends Verticle {
                             keyWaitingOperations = allOperations.get(key);
                         }
 
-                        synchronized(keyWaitingOperations) {
+                        synchronized (keyWaitingOperations) {
                             if (keyWaitingOperations.size() == 0) {
                                 keyWaitingOperations.put("GET", 1);
                             } else {
@@ -185,12 +185,37 @@ public class Coordinator extends Verticle {
                             }
                             releaseLock(key);
                         }
-                        String value = KeyValueLib.GET(dataCenters.get(Integer.parseInt(key)), key);
+                        String value = "null";
+                        switch (loc) {
+                            case "1":
+                                try {
+                                    value = KeyValueLib.GET(dataCenter1, key);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                                break;
+                            case "2":
+                                try {
+                                    value = KeyValueLib.GET(dataCenter2, key);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                                break;
+                            case "3":
+                                try {
+                                    value = KeyValueLib.GET(dataCenter3, key);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                                break;
+                            default:
+                        }
+
                         if (value.equals("null")) {
                             value = "0";
                         }
 
-                        synchronized(keyWaitingOperations) {
+                        synchronized (keyWaitingOperations) {
                             int numOps = keyWaitingOperations.get("GET");
                             numOps--;
                             if (numOps == 0) {
