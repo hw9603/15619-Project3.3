@@ -3,8 +3,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.MultiMap;
@@ -16,6 +18,222 @@ import org.vertx.java.platform.Verticle;
 public class KeyValueStore extends Verticle {
     /* TODO: Add code to implement your backend storage */
 
+    /**
+     * {@code #ConcurrentHashMap} stores all the key-value pairs.
+     *
+     */
+    private static ConcurrentHashMap<String, String> keyValueStorage = new ConcurrentHashMap<>();
+
+    /**
+     * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key.
+     *
+     */
+    private static ConcurrentHashMap<String, PriorityQueue<Long>> allTimestamps = new
+            ConcurrentHashMap<>();
+
+    /**
+     * {@code #ConcurrentHashMap} stores all the waiting task operation (put/get)
+     * by their own key.
+     *
+     */
+    private static ConcurrentHashMap<String, HashMap<String, Integer>> allOperations = new
+            ConcurrentHashMap<>();
+
+    /**
+     * {@code #ConcurrentHashMap} stores all the waiting precommit jobs by their own key.
+     *
+     */
+    private static ConcurrentHashMap<String, Integer> precommitOperations = new
+            ConcurrentHashMap<>();
+
+    /**
+     * Acquire lock measn peek at the current operation queue for the specified key,
+     * if the next one is the current operation, we start the thread. Otherwise, wait
+     * until awaken by other threads.
+     *
+     * @param timestamp the timestamp of the operation
+     * @param key the key of the operation
+     */
+    public static void acquireLock(Long timestamp, String key) {
+        PriorityQueue<Long> keyWaitingQueue;
+        synchronized (allTimestamps) {
+            keyWaitingQueue = allTimestamps.get(key);
+            if (keyWaitingQueue == null) {
+                PriorityQueue<Long> newQueue = new PriorityQueue<Long>();
+                allTimestamps.put(key, newQueue);
+                keyWaitingQueue = newQueue;
+            }
+            keyWaitingQueue = allTimestamps.get(key);
+            keyWaitingQueue.add(timestamp);
+        }
+
+        synchronized (keyWaitingQueue) {
+            Long top = keyWaitingQueue.peek();
+            while (!top.equals(timestamp)) {
+                try {
+                    keyWaitingQueue.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                top = keyWaitingQueue.peek();
+            }
+        }
+    }
+
+    /**
+     * Release lock means the current operation of the specified key is done.
+     * we release it and notify all the other threads with that key that we are done.
+     *
+     * @param key the key of the operation
+     */
+    public static void releaseLock(String key) {
+        PriorityQueue<Long> keyWaitingQueue = allTimestamps.get(key);
+        synchronized (keyWaitingQueue) {
+            keyWaitingQueue.poll();
+            keyWaitingQueue.notifyAll();
+        }
+    }
+
+    /**
+     * This function is to acquire lock for the PUT operation.
+     * We need to put one writer in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void putLock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+            if (keyWaitingOperations == null) {
+                HashMap<String, Integer> newMap = new HashMap<String, Integer>();
+                allOperations.put(key, newMap);
+                keyWaitingOperations = newMap;
+            }
+        }
+        synchronized (keyWaitingOperations) {
+            while (keyWaitingOperations.size() != 0) {
+                try {
+                    keyWaitingOperations.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+            keyWaitingOperations.put("PUT", 1);
+        }
+    }
+
+    /**
+     * This function is to release lock for the PUT operation.
+     * We need to remove one writer in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void putUnlock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+        }
+        synchronized (keyWaitingOperations) {
+            keyWaitingOperations.remove("PUT");
+        }
+    }
+
+    /**
+     * This function is to acquire lock for the GET operation.
+     * We need to add one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void getLock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+            if (keyWaitingOperations == null) {
+                HashMap<String, Integer> newMap = new HashMap<String, Integer>();
+                allOperations.put(key, newMap);
+                keyWaitingOperations = newMap;
+            }
+        }
+        // Add the GET job to the waiting queue.
+        synchronized (keyWaitingOperations) {
+            if (keyWaitingOperations.size() == 0) {
+                keyWaitingOperations.put("GET", 1);
+            } else {
+                keyWaitingOperations.put("GET",
+                        keyWaitingOperations.get("GET") + 1);
+            }
+        }
+    }
+
+    /**
+     * This function is to release lock for the GET operation.
+     * We need to reduce one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void getUnlock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+        }
+        // Update the number of GET operations.
+        synchronized (keyWaitingOperations) {
+            int numOps = keyWaitingOperations.get("GET");
+            numOps--;
+            if (numOps == 0) {
+                keyWaitingOperations.remove("GET");
+                keyWaitingOperations.notifyAll();
+            } else {
+                keyWaitingOperations.put("GET", numOps);
+            }
+        }
+    }
+
+    /**
+     * This function is to acquire lock for the PRECOMMIT operation.
+     * We need to add one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void precommitLock(String key) {
+        Integer precommitJob;
+        synchronized (precommitOperations) {
+            precommitJob = precommitOperations.get(key);
+            if (precommitJob == null) {
+                Integer newPrecommitJob = new Integer(1);
+                precommitOperations.put(key, newPrecommitJob);
+                precommitJob = newPrecommitJob;
+            }
+        }
+        synchronized (precommitJob) {
+            try {
+                precommitJob.wait();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    /**
+     * This function is to release lock for the PRECOMMIT operation.
+     * We need to reduce one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void precommitUnlock(String key) {
+        Integer precommitJob;
+        synchronized (precommitOperations) {
+            precommitJob = precommitOperations.get(key);
+        }
+        synchronized (precommitJob) {
+            precommitJob.notifyAll();
+        }
+    }
+
     @Override
     public void start() {
         final KeyValueStore keyValueStore = new KeyValueStore();
@@ -24,6 +242,7 @@ public class KeyValueStore extends Verticle {
         server.setAcceptBacklog(32767);
         server.setUsePooledBuffers(true);
         server.setReceiveBufferSize(4 * 1024);
+
         routeMatcher.get("/put", new Handler<HttpServerRequest>() {
             @Override
             public void handle(final HttpServerRequest req) {
@@ -37,6 +256,17 @@ public class KeyValueStore extends Verticle {
 
                 /* TODO: Add code here to handle the put request
                      Remember to use the explicit timestamp if needed! */
+
+                Thread t = new Thread(new Runnable() {
+                    public void run() {
+                        acquireLock(timestamp, key);
+                        putLock(key);
+                        keyValueStorage.put(key, value);
+                        putUnlock(key);
+                        releaseLock(key);
+                    }
+                });
+                t.start();
                 String response = "stored";
                 req.response().putHeader("Content-Type", "text/plain");
                 req.response().putHeader("Content-Length",
@@ -45,6 +275,7 @@ public class KeyValueStore extends Verticle {
                 req.response().close();
             }
         });
+
         routeMatcher.get("/get", new Handler<HttpServerRequest>() {
             @Override
             public void handle(final HttpServerRequest req) {
@@ -55,21 +286,44 @@ public class KeyValueStore extends Verticle {
 
                 /* TODO: Add code here to handle the get request
                      Remember that you may need to do some locking for this */
-                String response = "";
-                req.response().putHeader("Content-Type", "text/plain");
-                if (response != null) {
-                    req.response().putHeader("Content-Length",
-                            String.valueOf(response.length()));
-                }
-                req.response().end(response);
-                req.response().close();
+
+                Thread t = new Thread(new Runnable() {
+                    public void run() {
+                        acquireLock(timestamp, key);
+                        getLock(key);
+                        // Need to release lock in order not to block other GET requests
+                        releaseLock(key);
+                        // Do the GET job.
+                        String response = "";
+                        response = keyValueStorage.get(key);
+                        if (response == null) {
+                            response = "0";
+                        }
+                        getUnlock(key);
+
+                        req.response().putHeader("Content-Type", "text/plain");
+                        if (response != null) {
+                            req.response().putHeader("Content-Length",
+                                    String.valueOf(response.length()));
+                        }
+                        req.response().end(response);
+                        req.response().close();
+                    }
+                });
+                t.start();
             }
         });
+
         // Clears stored keys.
         routeMatcher.get("/reset", new Handler<HttpServerRequest>() {
             @Override
             public void handle(final HttpServerRequest req) {
                 /* TODO: Add code to here to flush your datastore. This is MANDATORY */
+                keyValueStorage.clear();
+                allTimestamps.clear();
+                allOperations.clear();
+                precommitOperations.clear();
+
                 req.response().putHeader("Content-Type", "text/plain");
                 req.response().end();
                 req.response().close();
@@ -84,6 +338,15 @@ public class KeyValueStore extends Verticle {
                 String key = map.get("key");
                 final Long timestamp = Long.parseLong(map.get("timestamp"));
                 /* TODO: Add code to handle the signal here if you wish */
+                Thread t = new Thread(new Runnable() {
+                    public void run() {
+                        acquireLock(timestamp, key);
+                        // precommitLock(key);
+                        // precommitUnlock(key);
+                        releaseLock(key);
+                    }
+                });
+                t.start();
                 req.response().putHeader("Content-Type", "text/plain");
                 /* Do not remove the following lines */
                 req.response().end("stored");
