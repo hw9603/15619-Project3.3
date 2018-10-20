@@ -24,9 +24,9 @@ public class Coordinator extends Verticle {
      * TODO: Set the values of the following variables to the PRIVATE IP of your
      * three dataCenter instances.
      */
-    private static final String dataCenter1 = "172.31.88.56";
-    private static final String dataCenter2 = "172.31.80.55";
-    private static final String dataCenter3 = "172.31.88.132";
+    private static final String dataCenter1 = "172.31.86.200";
+    private static final String dataCenter2 = "172.31.84.202";
+    private static final String dataCenter3 = "172.31.86.160";
 
     /**
      * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key.
@@ -56,8 +56,9 @@ public class Coordinator extends Verticle {
         synchronized (allTimestamps) {
             keyWaitingQueue = allTimestamps.get(key);
             if (keyWaitingQueue == null) {
-                allTimestamps.put(key, new PriorityQueue<String>());
-                keyWaitingQueue = allTimestamps.get(key);
+                PriorityQueue<String> newQueue = new PriorityQueue<String>();
+                allTimestamps.put(key, newQueue);
+                keyWaitingQueue = newQueue;
             }
             keyWaitingQueue = allTimestamps.get(key);
             keyWaitingQueue.add(timestamp);
@@ -80,12 +81,112 @@ public class Coordinator extends Verticle {
      * Release lock means the current operation of the specified key is done.
      * we release it and notify all the other threads with that key that we are done.
      *
+     * @param key the key of the operation
      */
     public static void releaseLock(String key) {
         PriorityQueue<String> keyWaitingQueue = allTimestamps.get(key);
         synchronized (keyWaitingQueue) {
             keyWaitingQueue.poll();
             keyWaitingQueue.notifyAll();
+        }
+    }
+
+    /**
+     * This function is to acquire lock for the PUT operation.
+     * We need to put one writer in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void putLock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+            if (keyWaitingOperations == null) {
+                HashMap<String, Integer> newMap = new HashMap<String, Integer>();
+                allOperations.put(key, newMap);
+                keyWaitingOperations = newMap;
+            }
+        }
+        synchronized (keyWaitingOperations) {
+            while (keyWaitingOperations.size() != 0) {
+                try {
+                    keyWaitingOperations.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+            keyWaitingOperations.put("PUT", 1);
+        }
+    }
+
+    /**
+     * This function is to release lock for the PUT operation.
+     * We need to remove one writer in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void putUnlock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+        }
+        synchronized (keyWaitingOperations) {
+            keyWaitingOperations.remove("PUT");
+        }
+    }
+
+    /**
+     * This function is to acquire lock for the GET operation.
+     * We need to add one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void getLock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+            if (keyWaitingOperations == null) {
+                HashMap<String, Integer> newMap = new HashMap<String, Integer>();
+                allOperations.put(key, newMap);
+                keyWaitingOperations = newMap;
+            }
+        }
+        // Add the GET job to the waiting queue.
+        synchronized (keyWaitingOperations) {
+            if (keyWaitingOperations.size() == 0) {
+                keyWaitingOperations.put("GET", 1);
+            } else {
+                keyWaitingOperations.put("GET",
+                        keyWaitingOperations.get("GET") + 1);
+            }
+        }
+    }
+
+    /**
+     * This function is to release lock for the GET operation.
+     * We need to reduce one reader in the hashmap.
+     *
+     * @param key the key of the operation
+     */
+    public static void getUnlock(String key) {
+        HashMap<String, Integer> keyWaitingOperations;
+        // Retrieve the waiting queue for the specified key.
+        synchronized (allOperations) {
+            keyWaitingOperations = allOperations.get(key);
+        }
+        // Update the number of GET operations.
+        synchronized (keyWaitingOperations) {
+            int numOps = keyWaitingOperations.get("GET");
+            numOps--;
+            if (numOps == 0) {
+                keyWaitingOperations.remove("GET");
+                keyWaitingOperations.notifyAll();
+            } else {
+                keyWaitingOperations.put("GET", numOps);
+            }
         }
     }
 
@@ -116,33 +217,16 @@ public class Coordinator extends Verticle {
                         //Each PUT operation is handled in a different thread.
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
-                        HashMap<String, Integer> keyWaitingOperations;
-                        // Retrieve the waiting queue for the specified key.
-                        synchronized (allOperations) {
-                            keyWaitingOperations = allOperations.get(key);
-                            if (keyWaitingOperations == null) {
-                                allOperations.put(key, new HashMap<String, Integer>());
-                                keyWaitingOperations = allOperations.get(key);
-                            }
+                        putLock(key);
+                        // There is no pending job. Just do the PUT job.
+                        try {
+                            KeyValueLib.PUT(dataCenter1, key, value);
+                            KeyValueLib.PUT(dataCenter2, key, value);
+                            KeyValueLib.PUT(dataCenter3, key, value);
+                        } catch (IOException e) {
+                            e.printStackTrace();
                         }
-                        // Lock on the waiting queue for the specified key.
-                        synchronized (keyWaitingOperations) {
-                            while (keyWaitingOperations.size() != 0) {
-                                try {
-                                    keyWaitingOperations.wait();
-                                } catch (InterruptedException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                            // There is no pending job. Just do the PUT job.
-                            try {
-                                KeyValueLib.PUT(dataCenter1, key, value);
-                                KeyValueLib.PUT(dataCenter2, key, value);
-                                KeyValueLib.PUT(dataCenter3, key, value);
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }
+                        putUnlock(key);
                         releaseLock(key);
                     }
                 });
@@ -172,24 +256,7 @@ public class Coordinator extends Verticle {
                         //Each GET operation is handled in a different thread.
                         //Highly recommended that you make use of helper functions.
                         acquireLock(timestamp, key);
-                        HashMap<String, Integer> keyWaitingOperations;
-                        // Retrieve the waiting queue for the specified key.
-                        synchronized (allOperations) {
-                            keyWaitingOperations = allOperations.get(key);
-                            if (keyWaitingOperations == null) {
-                                allOperations.put(key, new HashMap<String, Integer>());
-                                keyWaitingOperations = allOperations.get(key);
-                            }
-                        }
-                        // Add the GET job to the waiting queue.
-                        synchronized (keyWaitingOperations) {
-                            if (keyWaitingOperations.size() == 0) {
-                                keyWaitingOperations.put("GET", 1);
-                            } else {
-                                keyWaitingOperations.put("GET",
-                                        keyWaitingOperations.get("GET") + 1);
-                            }
-                        }
+                        getLock(key);
                         // Need to release lock in order not to block other GET requests
                         releaseLock(key);
                         // Do the GET job.
@@ -214,17 +281,7 @@ public class Coordinator extends Verticle {
                         if (value.equals("null")) {
                             value = "0";
                         }
-                        // Update the number of GET operations.
-                        synchronized (keyWaitingOperations) {
-                            int numOps = keyWaitingOperations.get("GET");
-                            numOps--;
-                            if (numOps == 0) {
-                                keyWaitingOperations.remove("GET");
-                                keyWaitingOperations.notifyAll();
-                            } else {
-                                keyWaitingOperations.put("GET", numOps);
-                            }
-                        }
+                        getUnlock(key);
                         req.response().end(value);
                     }
                 });
