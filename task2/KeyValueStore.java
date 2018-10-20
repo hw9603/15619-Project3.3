@@ -64,7 +64,6 @@ public class KeyValueStore extends Verticle {
                 keyWaitingQueue = newQueue;
             }
             keyWaitingQueue = allTimestamps.get(key);
-            keyWaitingQueue.add(timestamp);
         }
 
         synchronized (keyWaitingQueue) {
@@ -193,47 +192,6 @@ public class KeyValueStore extends Verticle {
         }
     }
 
-    /**
-     * This function is to acquire lock for the PRECOMMIT operation.
-     * We need to add one reader in the hashmap.
-     *
-     * @param key the key of the operation
-     */
-    public static void precommitLock(String key) {
-        Integer precommitJob;
-        synchronized (precommitOperations) {
-            precommitJob = precommitOperations.get(key);
-            if (precommitJob == null) {
-                Integer newPrecommitJob = new Integer(1);
-                precommitOperations.put(key, newPrecommitJob);
-                precommitJob = newPrecommitJob;
-            }
-        }
-        synchronized (precommitJob) {
-            try {
-                precommitJob.wait();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    /**
-     * This function is to release lock for the PRECOMMIT operation.
-     * We need to reduce one reader in the hashmap.
-     *
-     * @param key the key of the operation
-     */
-    public static void precommitUnlock(String key) {
-        Integer precommitJob;
-        synchronized (precommitOperations) {
-            precommitJob = precommitOperations.get(key);
-        }
-        synchronized (precommitJob) {
-            precommitJob.notifyAll();
-        }
-    }
-
     @Override
     public void start() {
         final KeyValueStore keyValueStore = new KeyValueStore();
@@ -289,17 +247,28 @@ public class KeyValueStore extends Verticle {
 
                 Thread t = new Thread(new Runnable() {
                     public void run() {
+                        PriorityQueue<Long> keyWaitingQueue;
+                        synchronized (allTimestamps) {
+                            keyWaitingQueue = allTimestamps.get(key);
+                            if (keyWaitingQueue == null) {
+                                PriorityQueue<Long> newQueue = new PriorityQueue<Long>();
+                                allTimestamps.put(key, newQueue);
+                                keyWaitingQueue = newQueue;
+                            }
+                            keyWaitingQueue = allTimestamps.get(key);
+                            keyWaitingQueue.add(timestamp);
+                        }
                         acquireLock(timestamp, key);
                         getLock(key);
                         // Need to release lock in order not to block other GET requests
                         releaseLock(key);
                         // Do the GET job.
-                        String response = "";
+                        String response = null;
                         response = keyValueStorage.get(key);
+                        getUnlock(key);
                         if (response == null) {
                             response = "0";
                         }
-                        getUnlock(key);
 
                         req.response().putHeader("Content-Type", "text/plain");
                         if (response != null) {
@@ -340,10 +309,17 @@ public class KeyValueStore extends Verticle {
                 /* TODO: Add code to handle the signal here if you wish */
                 Thread t = new Thread(new Runnable() {
                     public void run() {
-                        acquireLock(timestamp, key);
-                        // precommitLock(key);
-                        // precommitUnlock(key);
-                        releaseLock(key);
+                        PriorityQueue<Long> keyWaitingQueue;
+                        synchronized (allTimestamps) {
+                            keyWaitingQueue = allTimestamps.get(key);
+                            if (keyWaitingQueue == null) {
+                                PriorityQueue<Long> newQueue = new PriorityQueue<Long>();
+                                allTimestamps.put(key, newQueue);
+                                keyWaitingQueue = newQueue;
+                            }
+                            keyWaitingQueue = allTimestamps.get(key);
+                            keyWaitingQueue.add(timestamp);
+                        }
                     }
                 });
                 t.start();
@@ -370,4 +346,3 @@ public class KeyValueStore extends Verticle {
         server.listen(8080);
     }
 }
-
