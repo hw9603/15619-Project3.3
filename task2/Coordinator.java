@@ -73,10 +73,12 @@ public class Coordinator extends Verticle {
                 Thread t = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            KeyValueLib.PRECOMMIT(dataCenterUSE, key, ts);
-                            KeyValueLib.PRECOMMIT(dataCenterUSW, key, ts);
-                            KeyValueLib.PRECOMMIT(dataCenterSING, key, ts);
-                            TimeUnit.MILLISECONDS.sleep(500);
+                            if (consistencyType.equals("strong")) {
+                                KeyValueLib.PRECOMMIT(dataCenterUSE, key, ts);
+                                KeyValueLib.PRECOMMIT(dataCenterUSW, key, ts);
+                                KeyValueLib.PRECOMMIT(dataCenterSING, key, ts);
+                                TimeUnit.MILLISECONDS.sleep(500);
+                            }
                             KeyValueLib.PUT(dataCenterUSE, key, value, ts, consistencyType);
                             KeyValueLib.PUT(dataCenterUSW, key, value, ts, consistencyType);
                             KeyValueLib.PUT(dataCenterSING, key, value, ts, consistencyType);
@@ -108,8 +110,6 @@ public class Coordinator extends Verticle {
 
                 Thread t = new Thread(new Runnable() {
                     public void run() {
-                        // acquireLock(ts, key);
-                        // releaseLock(key);
                         String response = "0";
                         try {
                             switch (region) {

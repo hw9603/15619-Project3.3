@@ -40,6 +40,12 @@ public class KeyValueStore extends Verticle {
             ConcurrentHashMap<>();
 
     /**
+     * {@code #ConcurrentHashMap} stores the timestamp for the last update for each key.
+     *
+     */
+    private static ConcurrentHashMap<String, Long> updateTimestamp = new ConcurrentHashMap<>();
+
+    /**
      * Acquire lock measn peek at the current operation queue for the specified key,
      * if the next one is the current operation, we start the thread. Otherwise, wait
      * until awaken by other threads.
@@ -210,11 +216,21 @@ public class KeyValueStore extends Verticle {
 
                 Thread t = new Thread(new Runnable() {
                     public void run() {
-                        acquireLock(timestamp, key);
-                        putLock(key);
-                        keyValueStorage.put(key, value);
-                        putUnlock(key);
-                        releaseLock(key);
+                        if (consistency.equals("strong")) {
+                            acquireLock(timestamp, key);
+                            putLock(key);
+                            keyValueStorage.put(key, value);
+                            putUnlock(key);
+                            releaseLock(key);
+                        } else {
+                            if (!updateTimestamp.containsKey(key)) {
+                                keyValueStorage.put(key, value);
+                                updateTimestamp.put(key, timestamp);
+                            } else if (updateTimestamp.get(key).compareTo(timestamp) < 0) {
+                                keyValueStorage.put(key, value);
+                                updateTimestamp.put(key, timestamp);
+                            }
+                        }
                     }
                 });
                 t.start();
@@ -240,33 +256,35 @@ public class KeyValueStore extends Verticle {
 
                 Thread t = new Thread(new Runnable() {
                     public void run() {
-                        PriorityQueue<Long> keyWaitingQueue;
-                        synchronized (allTimestamps) {
-                            keyWaitingQueue = allTimestamps.get(key);
-                            if (keyWaitingQueue == null) {
-                                PriorityQueue<Long> newQueue = new PriorityQueue<Long>();
-                                allTimestamps.put(key, newQueue);
-                                keyWaitingQueue = newQueue;
-                            }
-                            keyWaitingQueue = allTimestamps.get(key);
-                        }
-                        synchronized (keyWaitingQueue) {
-                            keyWaitingQueue.add(timestamp);
-                        }
-                        acquireLock(timestamp, key);
-                        getLock(key);
-                        // Need to release lock in order not to block other GET requests
-                        releaseLock(key);
-                        // Do the GET job.
                         String response = null;
-                        synchronized (keyValueStorage) {
+                        if (consistency.equals("strong")) {
+                            // Add the timestamp to the queue.
+                            PriorityQueue<Long> keyWaitingQueue;
+                            synchronized (allTimestamps) {
+                                keyWaitingQueue = allTimestamps.get(key);
+                                if (keyWaitingQueue == null) {
+                                    PriorityQueue<Long> newQueue = new PriorityQueue<Long>();
+                                    allTimestamps.put(key, newQueue);
+                                    keyWaitingQueue = newQueue;
+                                }
+                                keyWaitingQueue = allTimestamps.get(key);
+                            }
+                            synchronized (keyWaitingQueue) {
+                                keyWaitingQueue.add(timestamp);
+                            }
+                            acquireLock(timestamp, key);
+                            getLock(key);
+                            // Need to release lock in order not to block other GET requests
+                            releaseLock(key);
+                            // Do the GET job.
+                            response = keyValueStorage.get(key);
+                            getUnlock(key);
+                        } else {
                             response = keyValueStorage.get(key);
                         }
-                        getUnlock(key);
                         if (response == null) {
                             response = "0";
                         }
-
                         req.response().putHeader("Content-Type", "text/plain");
                         if (response != null) {
                             req.response().putHeader("Content-Length",
@@ -305,6 +323,7 @@ public class KeyValueStore extends Verticle {
                 /* TODO: Add code to handle the signal here if you wish */
                 Thread t = new Thread(new Runnable() {
                     public void run() {
+                        // Add timestamp to the queue.
                         PriorityQueue<Long> keyWaitingQueue;
                         synchronized (allTimestamps) {
                             keyWaitingQueue = allTimestamps.get(key);
