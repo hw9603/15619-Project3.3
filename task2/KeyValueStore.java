@@ -40,13 +40,6 @@ public class KeyValueStore extends Verticle {
             ConcurrentHashMap<>();
 
     /**
-     * {@code #ConcurrentHashMap} stores all the waiting precommit jobs by their own key.
-     *
-     */
-    private static ConcurrentHashMap<String, Integer> precommitOperations = new
-            ConcurrentHashMap<>();
-
-    /**
      * Acquire lock measn peek at the current operation queue for the specified key,
      * if the next one is the current operation, we start the thread. Otherwise, wait
      * until awaken by other threads.
@@ -256,6 +249,8 @@ public class KeyValueStore extends Verticle {
                                 keyWaitingQueue = newQueue;
                             }
                             keyWaitingQueue = allTimestamps.get(key);
+                        }
+                        synchronized (keyWaitingQueue) {
                             keyWaitingQueue.add(timestamp);
                         }
                         acquireLock(timestamp, key);
@@ -264,7 +259,9 @@ public class KeyValueStore extends Verticle {
                         releaseLock(key);
                         // Do the GET job.
                         String response = null;
-                        response = keyValueStorage.get(key);
+                        synchronized (keyValueStorage) {
+                            response = keyValueStorage.get(key);
+                        }
                         getUnlock(key);
                         if (response == null) {
                             response = "0";
@@ -291,7 +288,6 @@ public class KeyValueStore extends Verticle {
                 keyValueStorage.clear();
                 allTimestamps.clear();
                 allOperations.clear();
-                precommitOperations.clear();
 
                 req.response().putHeader("Content-Type", "text/plain");
                 req.response().end();
@@ -318,6 +314,8 @@ public class KeyValueStore extends Verticle {
                                 keyWaitingQueue = newQueue;
                             }
                             keyWaitingQueue = allTimestamps.get(key);
+                        }
+                        synchronized (keyWaitingQueue) {
                             keyWaitingQueue.add(timestamp);
                         }
                     }
@@ -346,3 +344,4 @@ public class KeyValueStore extends Verticle {
         server.listen(8080);
     }
 }
+

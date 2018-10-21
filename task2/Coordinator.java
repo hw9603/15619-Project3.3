@@ -6,6 +6,7 @@ import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.MultiMap;
@@ -39,69 +40,6 @@ public class Coordinator extends Verticle {
 
     private static final String truetimeServer = "172.31.80.100";
 
-    /**
-     * {@code #ConcurrentHashMap} stores all the waiting task timestamps by their own key.
-     *
-     */
-    private static ConcurrentHashMap<String, PriorityQueue<String>> allTimestamps = new
-            ConcurrentHashMap<>();
-
-    /**
-     * {@code #ConcurrentHashMap} stores all the waiting task operation (put/get)
-     * by their own key.
-     *
-     */
-    private static ConcurrentHashMap<String, HashMap<String, Integer>> allOperations = new
-            ConcurrentHashMap<>();
-
-    /**
-     * Acquire lock measn peek at the current operation queue for the specified key,
-     * if the next one is the current operation, we start the thread. Otherwise, wait
-     * until awaken by other threads.
-     *
-     * @param timestamp the timestamp of the operation
-     * @param key the key of the operation
-     */
-    public static void acquireLock(String timestamp, String key) {
-        PriorityQueue<String> keyWaitingQueue;
-        synchronized (allTimestamps) {
-            keyWaitingQueue = allTimestamps.get(key);
-            if (keyWaitingQueue == null) {
-                PriorityQueue<String> newQueue = new PriorityQueue<String>();
-                allTimestamps.put(key, newQueue);
-                keyWaitingQueue = newQueue;
-            }
-            keyWaitingQueue = allTimestamps.get(key);
-            keyWaitingQueue.add(timestamp);
-        }
-
-        synchronized (keyWaitingQueue) {
-            String top = keyWaitingQueue.peek();
-            while (!top.equals(timestamp)) {
-                try {
-                    keyWaitingQueue.wait();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                top = keyWaitingQueue.peek();
-            }
-        }
-    }
-
-    /**
-     * Release lock means the current operation of the specified key is done.
-     * we release it and notify all the other threads with that key that we are done.
-     *
-     * @param key the key of the operation
-     */
-    public static void releaseLock(String key) {
-        PriorityQueue<String> keyWaitingQueue = allTimestamps.get(key);
-        synchronized (keyWaitingQueue) {
-            keyWaitingQueue.poll();
-            keyWaitingQueue.notifyAll();
-        }
-    }
-
 
     @Override
     public void start() {
@@ -134,18 +72,19 @@ public class Coordinator extends Verticle {
 
                 Thread t = new Thread(new Runnable() {
                     public void run() {
-                        // acquireLock(ts, key);
                         try {
                             KeyValueLib.PRECOMMIT(dataCenterUSE, key, ts);
                             KeyValueLib.PRECOMMIT(dataCenterUSW, key, ts);
                             KeyValueLib.PRECOMMIT(dataCenterSING, key, ts);
+                            TimeUnit.MILLISECONDS.sleep(500);
                             KeyValueLib.PUT(dataCenterUSE, key, value, ts, consistencyType);
                             KeyValueLib.PUT(dataCenterUSW, key, value, ts, consistencyType);
                             KeyValueLib.PUT(dataCenterSING, key, value, ts, consistencyType);
                         } catch (IOException e) {
                             e.printStackTrace();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
                         }
-                        // releaseLock(key);
                     }
                 });
                 t.start();
